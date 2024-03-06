@@ -37,13 +37,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "http_config.h"
 #include "http_log.h"
 #include "http_request.h"
+#include "http_protocol.h"
+#include "ap_config.h"
 
 #ifdef APLOG_USE_MODULE
-APLOG_USE_MODULE(evasive20);
+APLOG_USE_MODULE(retry_later);
 #endif
 
 module AP_MODULE_DECLARE_DATA
-evasive20_module;
+retry_later_module;
 
 #if AP_SERVER_MAJORVERSION_NUMBER > 2 || \
     (AP_SERVER_MAJORVERSION_NUMBER == 2 && AP_SERVER_MINORVERSION_NUMBER >= 4)
@@ -64,7 +66,7 @@ evasive20_module;
 #define DEFAULT_SITE_INTERVAL   1       // Default 1 Second site interval
 #define DEFAULT_BLOCKING_PERIOD 10      // Default for Detected IPs; blocked for 10 seconds
 #define DEFAULT_LOG_DIR        "/tmp"  // Default temp directory
-#define DEFAULT_HTTP_RESPONSE_CODE HTTP_FORBIDDEN
+#define DEFAULT_HTTP_RESPONSE_CODE HTTP_TOO_MANY_REQUESTS
 
 /* END DoS Evasive Maneuvers Definitions */
 
@@ -222,7 +224,7 @@ static int access_checker(request_rec *r) {
             }
         }
 
-        /* Perform email notification and system functions */
+        /* Perform email notification, system functions, and response */
         if (ret == http_response_code) {
             char filename[1024];
             struct stat s;
@@ -233,7 +235,7 @@ static int access_checker(request_rec *r) {
             if (stat(filename, &s)) {
                 file = fopen(filename, "w");
                 if (file != NULL) {
-                    fprintf(file, "%ld\n", getpid());
+                    fprintf(file, "%d\n", getpid());
                     fclose(file);
 
                     LOG(LOG_ALERT, "Blacklisting address %s: possible DoS attack.", CLIENT_IP(r->connection));
@@ -243,14 +245,18 @@ static int access_checker(request_rec *r) {
                         if (file != NULL) {
                             fprintf(file, "To: %s\n", email_notify);
                             fprintf(file, "Subject: HTTP BLACKLIST %s\n\n", CLIENT_IP(r->connection));
-                            fprintf(file, "mod_evasive HTTP Blacklisted %s\n", CLIENT_IP(r->connection));
+                            fprintf(file, "mod_retry_later HTTP Blacklisted %s\n", CLIENT_IP(r->connection));
                             pclose(file);
                         }
                     }
 
                     if (system_command != NULL) {
                         snprintf(filename, sizeof(filename), system_command, CLIENT_IP(r->connection));
-                        system(filename);
+                        int ret = system(filename);
+                        if (ret == -1) {
+                            // Handle error when the system command cannot be executed
+                            LOG(LOG_ALERT, "mod_retry_later: system command failed: %d", ret);
+                        }
                     }
 
                 } else {
@@ -259,6 +265,30 @@ static int access_checker(request_rec *r) {
 
             } /* if (temp file does not exist) */
 
+            if (DEFAULT_HTTP_RESPONSE_CODE == HTTP_TOO_MANY_REQUESTS) {
+                // Set the content type of the response
+                ap_set_content_type(r, "text/html");
+
+                // Convert blocking_period to a string
+                char blocking_period_str[20];
+                snprintf(blocking_period_str, sizeof(blocking_period_str), "%d", blocking_period);
+                // Send Header
+                apr_table_set(r->headers_out, "Retry-After", blocking_period_str);
+
+                // Create the custom response message
+                char response_body[256];
+                snprintf(response_body, sizeof(response_body), "Too many requests. Try again after %s seconds.\n",
+                         blocking_period_str);
+
+                // Return HTTP status code
+                r->status = DEFAULT_HTTP_RESPONSE_CODE;
+
+                // Send response
+                ap_rputs(response_body, r);
+
+                // Tell Apache the request is DONE. No further processing.
+                return DONE;
+            }
         } /* if (ret == http_response_code) */
 
     } /* if (r->prev == NULL && r->main == NULL && hit_list != NULL) */
@@ -270,6 +300,7 @@ static int access_checker(request_rec *r) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                       "client denied by server configuration: %s",
                       r->filename);
+
     }
 
     return ret;
@@ -728,7 +759,7 @@ static void register_hooks(apr_pool_t *p) {
 };
 
 module AP_MODULE_DECLARE_DATA
-evasive20_module =
+retry_later_module =
         {
                 STANDARD20_MODULE_STUFF,
                 NULL,
