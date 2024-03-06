@@ -1,14 +1,24 @@
-Apache Evasive Maneuvers Module
-For Apache 1.3 and 2.0
-Jonathan Zdziarski
-Version 1.10 [2005.0117]
+Apache Retry Later Module  
+For Apache 2.4  
+Thorsten Kramm, dimedis GmbH  
 
-## WHAT IS MOD_EVASIVE ?
+Based on:  
+[Apache Evasive Maneuvers Module](https://github.com/jzdziarski/mod_evasive/tree/master)
+For Apache 1.3 and 2.0  
+Jonathan Zdziarski, Version 1.10 [2005.0117]
 
-mod_evasive is an evasive maneuvers module for Apache to provide evasive
+## Changes to the original version
+
+* Returns "429 Too many requests" instead of "403 Forbidden" and a Retry-After header indicating when the next
+  request will be allowed.
+* Dropped support for Apache < 2.4
+
+## WHAT IS mod_retry_later ?
+
+mod_retry_later is an evasive maneuvers module for Apache to provide evasive
 action in the event of an HTTP DoS or DDoS attack or brute force attack.  It
 is also designed to be a detection tool, and can be easily configured to talk
-to ipchains, firewalls, routers, and etcetera.
+to ipchains, firewalls, routers, etc.
 
 Detection is performed by creating an internal dynamic hash table of IP
 Addresses and URIs, and denying any single IP address from any of the following:
@@ -17,8 +27,8 @@ Addresses and URIs, and denying any single IP address from any of the following:
 - Making more than 50 concurrent requests on the same child per second
 - Making any requests while temporarily blacklisted (on a blocking list)
 
-This method has worked well in both single-server script attacks as well
-as distributed attacks, but just like other evasive tools, is only as
+This method has worked well in both single-server script attacks and
+distributed attacks, but just like other evasive tools, is only as
 useful to the point of bandwidth and processor consumption (e.g. the
 amount of bandwidth and processor required to receive/process/respond
 to invalid requests), which is why it's a good idea to integrate this
@@ -30,15 +40,6 @@ legitimate requests are rarely ever compromised, only legitimate attacks.  Even
 a user repeatedly clicking on 'reload' should not be affected unless they do
 it maliciously.
 
-Three different module sources have been provided:
-
-Apache v1.3 API:	mod_evasive.c
-Apache v2.0 API:	mod_evasive20.c
-NSAPI (iPlanet):	mod_evasiveNSAPI.c *
-
-NOTE: mod_evasiveNSAPI is a port submitted by Reine Persson <reiper@rsv.se>
-and is not officially supported as part of the mod_evasive project.
-
 ## HOW IT WORKS
 
 A web hit request comes in. The following steps take place:
@@ -49,7 +50,7 @@ A web hit request comes in. The following steps take place:
   if the same host has requested this page more than once within the past
   1 second.
 - The IP address of the requestor is hashed into a "key".
-  A lookup is performed in the listerner's internal hash table to determine
+  A lookup is performed in the listener's internal hash table to determine
   if the same host has requested more than 50 objects within the past
   second (from the same child).
 
@@ -58,7 +59,7 @@ bandwidth and system resources in the event of a DoS attack.  Additionally,
 a system command and/or an email notification can also be triggered to block
 all the originating addresses of a DDoS attack.
 
-Once a single 403 incident occurs, mod_evasive now blocks the entire IP
+Once a single 429 incident occurs, mod_retry_later now blocks the entire IP
 address for a period of 10 seconds (configurable).  If the host requests a
 page within this period, it is forced to wait even longer.  Since this is
 triggered from requesting the same URL multiple times per second, this
@@ -68,16 +69,16 @@ The blacklist can/should be configured to talk to your network's firewalls
 and/or routers to push the attack out to the front lines, but this is not
 required.
 
-mod_evasive also performs syslog reporting using daemon.alert.  Messages
+mod_retry_later also performs syslog reporting using daemon.alert.  Messages
 will look like this:
 
-    Aug  6 17:41:49 elijah mod_evasive[23184]: [ID 801097 daemon.alert] Blacklisting address x.x.x.x: possible attack.
+    Aug  6 17:41:49 elijah mod_retry_later[23184]: [ID 801097 daemon.alert] Blacklisting address x.x.x.x: possible attack.
 
 ## WHAT IS THIS TOOL USEFUL FOR?
 
 This tool is *excellent* at fending off request-based DoS attacks or scripted
 attacks, and brute force attacks. When integrated with firewalls or IP filters,
-mod_evasive can stand up to even large attacks. Its features will prevent you
+mod_retry_later can stand up to even large attacks. Its features will prevent you
 from wasting bandwidth or having a few thousand CGI scripts running as a
 result of an attack.
 
@@ -89,15 +90,18 @@ will most likely still take you offline.
 
 ## HOW TO INSTALL
 
-TBD
+    apt install apache2-dev
+    git clone https://github.com/thorstenkramm/mod_retry_later.git
+    cd mod_retry_later
+    sudo apxs -i -a -c mod_retry_later.c
 
 ## CONFIGURATION
 
-mod_evasive has default options configured, but you may also add the
-following block to your httpd.conf:
+mod_retry_later has default options configured, but you may also add the
+following block to your `/etc/apache2/mods-enabled/retry_later.conf`:
 
 ```
-<IfModule mod_evasive20.c>
+<IfModule mod_retry_later.c>
     DOSHashTableSize    3097
     DOSPageCount        2
     DOSSiteCount        50
@@ -111,11 +115,11 @@ Optionally you can also add the following directives:
 
     DOSEmailNotify	you@yourdomain.com
     DOSSystemCommand	"su - someuser -c '/sbin/... %s ...'"
-    DOSLogDir		"/var/lock/mod_evasive"
+    DOSLogDir		"/var/lock/mod_retry_later"
 
 You will also need to add this line if you are building with dynamic support:
 
-LoadModule evasive20_module modules/mod_evasive20.so
+    LoadModule retry_later_module /usr/lib/apache2/modules/mod_retry_later.so
 
 (This line is already added to your configuration by apxs)
 
@@ -128,29 +132,29 @@ hash table.  Increasing this number will provide faster performance by
 decreasing the number of iterations required to get to the record, but
 consume more memory for table space.  You should increase this if you have
 a busy web server.  The value you specify will automatically be tiered up to
-the next prime number in the primes list (see mod_evasive.c for a list
+the next prime number in the primes list (see mod_retry_later.c for a list
 of primes used).
 
 #### DOSPageCount
 
-This is the threshhold for the number of requests for the same page (or URI)
-per page interval.  Once the threshhold for that interval has been exceeded,
+This is the threshold for the number of requests for the same page (or URI)
+per page interval.  Once the threshold for that interval has been exceeded,
 the IP address of the client will be added to the blocking list.
 
 ### DOSSiteCount
 
-This is the threshhold for the total number of requests for any object by
-the same client on the same listener per site interval.  Once the threshhold
+This is the threshold for the total number of requests for any object by
+the same client on the same listener per site interval.  Once the threshold
 for that interval has been exceeded, the IP address of the client will be added
 to the blocking list.
 
 ### DOSPageInterval
 
-The interval for the page count threshhold; defaults to 1 second intervals.
+The interval for the page count threshold; defaults to 1 second intervals.
 
 ### DOSSiteInterval
 
-The interval for the site count threshhold; defaults to 1 second intervals.
+The interval for the site count threshold; defaults to 1 second intervals.
 
 ### DOSBlockingPeriod
 
@@ -167,13 +171,13 @@ If this value is set, an email will be sent to the address specified
 whenever an IP address becomes blacklisted.  A locking mechanism using /tmp
 prevents continuous emails from being sent.
 
-NOTE: Be sure MAILER is set correctly in mod_evasive.c
-(or mod_evasive20.c).  The default is "/bin/mail -t %s" where %s is
+NOTE: Be sure MAILER is set correctly in mod_retry_later.c
+The default is "/bin/mail -t %s" where %s is
 used to denote the destination email address set in the configuration.  
 If you are running on linux or some other operating system with a
 different type of mailer, you'll need to change this.
 
-#### DOSSystemCommand
+### DOSSystemCommand
 
 If this value is set, the system command specified will be executed
 whenever an IP address becomes blacklisted.  This is designed to enable
@@ -190,7 +194,7 @@ security issues if your system is open to shell users.
 
   	http://security.lss.hr/index.php?page=details&ID=LSS-2005-01-01
 
-In the event you have nonprivileged shell users, you'll want to create a
+In the event you have none-privileged shell users, you'll want to create a
 directory writable only to the user Apache is running as (usually root),
 then set this in your httpd.conf.
 
@@ -198,12 +202,12 @@ WHITELISTING IP ADDRESSES
 
 IP addresses of trusted clients can be whitelisted to insure they are never
 denied.  The purpose of whitelisting is to protect software, scripts, local
-searchbots, or other automated tools from being denied for requesting large
+search bots, or other automated tools from being denied for requesting large
 amounts of data from the server.  Whitelisting should *not* be used to add
 customer lists or anything of the sort, as this will open the server to abuse.
 This module is very difficult to trigger without performing some type of
 malicious attack, and for that reason it is more appropriate to allow the
-module to decide on its own whether or not an individual customer should be
+module to decide on its own whether an individual customer should be
 blocked.
 
 To whitelist an address (or range) add an entry to the Apache configuration
@@ -220,7 +224,7 @@ DOSWhitelist commands may be used in the configuration.
 The keep-alive settings for your children should be reasonable enough to
 keep each child up long enough to resist a DOS attack (or at least part of
 one).  Remember, it is the child processes that maintain their own internal
-IP address tables, and so when one exits, so does all of the IP information it
+IP address tables, and so when one exits, so does all the IP information it
 had. For every child that exits, another 5-10 copies of the page may get
 through before putting the attacker back into '403 Land'.  With this said,
 you should have a very high MaxRequestsPerChild, but not unlimited as this
@@ -235,13 +239,13 @@ longer be open in between child cycles).
 
 ## TESTING
 
-Want to make sure it's working? Run test.pl, and view the response codes.
-It's best to run it several times on the same machine as the web server until
-you get 403 Forbidden messages. Some larger servers with high child counts
-may require more of a beating than smaller servers before blacklisting
-addresses.
+Use `ab` to simulate many parallel requests. For example:
 
-Please don't use this script to DoS others without their permission.
+    ab -c 5 -n 10 http://localhost/
+
+Another way to create consecutive requests is a simple watch loop.
+
+    watch -n 0.2 curl localhost
 
 ## KNOWN BUGS
 
@@ -251,5 +255,4 @@ Please don't use this script to DoS others without their permission.
 
 ## FEEDBACK
 
-Please email me with questions, constructive comments, or feedback:
-jonathan@nuclearelephant.com
+Use the repo issues to submit bugs.
