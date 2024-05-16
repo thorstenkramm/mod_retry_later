@@ -116,6 +116,10 @@ Optionally you can also add the following directives:
     DOSEmailNotify	you@yourdomain.com
     DOSSystemCommand	"su - someuser -c '/sbin/... %s ...'"
     DOSLogDir		"/var/lock/mod_retry_later"
+    DOSExcludeURIRe <REGEX>
+    # DOSExcludeURIRe \.(jpg|png|gif|css)$.
+    DOSResponseDocument <PATH>
+    # DOSResponseDocument /var/www/html/429.html
 
 You will also need to add this line if you are building with dynamic support:
 
@@ -198,7 +202,7 @@ In the event you have none-privileged shell users, you'll want to create a
 directory writable only to the user Apache is running as (usually root),
 then set this in your httpd.conf.
 
-WHITELISTING IP ADDRESSES
+### WHITELISTING IP ADDRESSES
 
 IP addresses of trusted clients can be whitelisted to insure they are never
 denied.  The purpose of whitelisting is to protect software, scripts, local
@@ -218,6 +222,31 @@ in the following fashion:
 
 Wildcards can be used on up to the last 3 octets if necessary.  Multiple
 DOSWhitelist commands may be used in the configuration.
+
+### EXCLUDE REQUESTS FROM RATE LIMITING
+
+Usually you only want to block the "heavy" requests. Modern web applications and the 
+preload functions of browsers fire multiple requests when a website is accessed.
+The vast majority of requests are for static content (css, js, images, etc).
+
+If requests for static content count for rate limiting, you need to set high thresholds.
+However, the number of requests for static content can vary from page to page. 
+
+You can exclude requests from being processed by rate limiting by extending the 
+module configuration with a line like this
+
+    DOSExcludeURIRe \.(jpg|png|gif|css)$.
+
+If the request URI matches the regular expression, the module terminates and Apache continues.
+
+
+### CUSTOMISING THE RESPONSE DOCUMENT
+
+Because the module acts before virtual hosts are loaded, error documents specified in your
+regular Apache configuration are ignored. If you want to return a custom HTML page when a client reaches the 
+a client hits the rate limit, you can add a line like this to the module configuration:
+
+    DOSResponseDocument /var/www/html/429.html
 
 ## TWEAKING APACHE
 

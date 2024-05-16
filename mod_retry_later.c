@@ -31,6 +31,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <time.h>
 #include <syslog.h>
 #include <errno.h>
+#include <apr_file_io.h>
 
 #include "httpd.h"
 #include "http_core.h"
@@ -39,6 +40,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "http_request.h"
 #include "http_protocol.h"
 #include "ap_config.h"
+#include "ap_regex.h"
 
 #ifdef APLOG_USE_MODULE
 APLOG_USE_MODULE(retry_later);
@@ -129,6 +131,8 @@ static int blocking_period = DEFAULT_BLOCKING_PERIOD;
 static char *email_notify = NULL;
 static char *log_dir = NULL;
 static char *system_command = NULL;
+static char *response_document = NULL;
+static char *exclude_uri_re = NULL;
 
 static const char *whitelist(cmd_parms *cmd, void *dconfig, const char *ip);
 
@@ -166,6 +170,16 @@ static int access_checker(request_rec *r) {
         /* Check whitelist */
         if (is_whitelisted(CLIENT_IP(r->connection)))
             return OK;
+
+        /* Check if URI shall be ignored */
+        if (exclude_uri_re) {
+            ap_regex_t *re = ap_pregcomp(r->pool, exclude_uri_re, AP_REG_EXTENDED | AP_REG_NOSUB);
+            if (ap_regexec(re, r->uri, 0, NULL, 0) == 0) {
+                ap_pregfree(r->pool, re);
+                return OK;
+            }
+            ap_pregfree(r->pool, re);
+        }
 
         /* First see if the IP itself is on "hold" */
         n = ntt_find(hit_list, CLIENT_IP(r->connection));
@@ -275,10 +289,48 @@ static int access_checker(request_rec *r) {
                 // Send Header
                 apr_table_set(r->headers_out, "Retry-After", blocking_period_str);
 
-                // Create the custom response message
-                char response_body[256];
-                snprintf(response_body, sizeof(response_body), "Too many requests. Try again after %s seconds.\n",
-                         blocking_period_str);
+                // Declare response_body pointer here to have function-wide scope
+                char *response_body = NULL;
+
+                // Get or generate the custom response message
+                if (response_document) {
+                    /* We have custom response document from a file */
+                    // Open the file
+                    apr_file_t *file = NULL;
+                    apr_finfo_t finfo;
+                    apr_status_t rv = apr_file_open(&file, response_document, APR_READ, APR_OS_DEFAULT, r->pool);
+                    if (rv != APR_SUCCESS) {
+                        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "Failed to open response document: %s", response_document);
+                        return HTTP_INTERNAL_SERVER_ERROR; // Or some other appropriate error response
+                    }
+
+                    // Get file info
+                    apr_file_info_get(&finfo, APR_FINFO_SIZE, file);
+
+                    // Allocate buffer for the file content
+                    response_body = apr_palloc(r->pool, finfo.size + 1);
+                    if (response_body == NULL) {
+                        apr_file_close(file);
+                        ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_ENOMEM, r, "Memory allocation failure.");
+                        return HTTP_INTERNAL_SERVER_ERROR;
+                    }
+
+                    // Read the file into the buffer
+                    apr_size_t bytes_read;
+                    apr_file_read_full(file, response_body, finfo.size, &bytes_read);
+                    response_body[bytes_read] = '\0'; // Ensure null termination
+
+                    // Close the file
+                    apr_file_close(file);
+                } else {
+                    response_body = apr_palloc(r->pool, 1024);
+                    if (response_body == NULL) {
+                        ap_log_rerror(APLOG_MARK, APLOG_ERR, APR_ENOMEM, r, "Memory allocation failure.");
+                        return HTTP_INTERNAL_SERVER_ERROR;
+                    }
+                    snprintf(response_body, 1024, "Too many requests. Try again after %s seconds.\n",
+                            blocking_period_str);
+                }
 
                 // Return HTTP status code
                 r->status = DEFAULT_HTTP_RESPONSE_CODE;
@@ -712,6 +764,28 @@ get_http_response_code(cmd_parms *cmd, void *dconfig, const char *value) {
     return NULL;
 }
 
+/* Declaration of the function to get the response document path */
+static const char *
+get_response_document(cmd_parms *cmd, void *dummy, const char *arg) {
+    if (arg != NULL && arg[0] != '\0') {
+        if (response_document != NULL)
+            free(response_document);
+        response_document = strdup(arg);
+    }
+    return NULL;
+}
+
+/* Declaration of the function to get the regex pattern for excluding URIs */
+static const char *
+get_exclude_re(cmd_parms *cmd, void *dummy, const char *arg) {
+    if (arg != NULL && arg[0] != '\0') {
+        if (exclude_uri_re != NULL)
+            free(exclude_uri_re);
+        exclude_uri_re = strdup(arg);
+    }
+    return NULL;
+}
+
 
 /* END Configuration Functions */
 
@@ -749,6 +823,12 @@ static const command_rec access_cmds[] =
 
                 AP_INIT_TAKE1("DOSHTTPResponseCode", get_http_response_code, NULL, RSRC_CONF,
                               "Set HTTP response code returned when IP is blocked"),
+
+                AP_INIT_TAKE1("DOSResponseDocument", get_response_document, NULL, RSRC_CONF,
+                              "Set document to be returned on limit hit"),
+
+                AP_INIT_TAKE1("DOSExcludeURIRe", get_exclude_re, NULL, RSRC_CONF,
+                              "Rehular expression to exclude requests from rate limiting if URI macthes regex"),
 
                 {NULL}
         };
