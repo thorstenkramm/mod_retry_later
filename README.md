@@ -116,10 +116,18 @@ Optionally you can also add the following directives:
     DOSEmailNotify	you@yourdomain.com
     DOSSystemCommand	"su - someuser -c '/sbin/... %s ...'"
     DOSLogDir		"/var/lock/mod_retry_later"
+
     DOSExcludeURIRe <REGEX>
-    # DOSExcludeURIRe \.(jpg|png|gif|css)$.
+    # DOSExcludeURIRe \.(jpg|png|gif|css|js|woff|svg)$
+
     DOSResponseDocument <PATH>
     # DOSResponseDocument /var/www/html/429.html
+
+    DOSDebugLog <PATH>
+    # DOSDebugLog /tmp/retry_later_debug.log
+
+    DOSClientIPHeader <HEADER-NAME>
+    #DOSClientIPHeader my-ip
 
 You will also need to add this line if you are building with dynamic support:
 
@@ -243,10 +251,53 @@ If the request URI matches the regular expression, the module terminates and Apa
 ### CUSTOMISING THE RESPONSE DOCUMENT
 
 Because the module acts before virtual hosts are loaded, error documents specified in your
-regular Apache configuration are ignored. If you want to return a custom HTML page when a client reaches the 
-a client hits the rate limit, you can add a line like this to the module configuration:
+regular Apache configuration are ignored. If you want to return a custom HTML page when a client 
+hits the rate limit, you can add a line like this to the module configuration:
 
     DOSResponseDocument /var/www/html/429.html
+
+### RUNNING BEHIND A REVERSE PROXY
+
+You can instruct the module to retrieve te client's IP address from a custom header instead of
+using the remote IP address from the connection. Insert a line like this to the configuration file:
+
+    DOSClientIPHeader my-ip
+
+The above example cause the module to give the value of the "my-ip" header preference over the remote 
+IP address. If the header contains a list of values, the last (most right) element is used.
+
+Therefore, the traditional X-Forwarded-For header is not suitable. If you run Apache behind a 
+reverse proxy, the proxy must insert the client's IP address in a custom header you can trust.
+
+If a client adds values to this header the module will ignore it, because these values will be 
+the first in the list.
+
+Header names are not case-sensitive. Using "my-ip" or "My-IP" gives the same results.
+
+### DEBUG LOGGING
+
+By inserting a line like this to the configuration, you can enable additional logging.
+
+    DOSDebugLog /tmp/retry_later_debug.log
+
+You get log lines like this example:
+
+    [2024-05-17 09:42:57] "GET /" 429 "curl/7.74.0" "Remote-IP: ::1", "Real-Client-IP (From connection): ::1"
+    [2024-05-17 09:39:59] "GET /" 429 "curl/7.74.0" "Remote-IP: ::1", "Real-Client-IP (From Header my-ip): 192.167.9.92"
+
+This debug logging is only useful if you pretend retrieving the client's IP address from a custom header.
+All requests and response code are logged to the Apache access log anyway. If you retrieve the client's IP 
+address from the connection (default), the debug log contains the same information as the access log.
+
+If the client's IP address is extracted from a custom header, the log contains both, the IP address from the 
+connection, usually the IP address from the reverse proxy, and the IP address retrieved from the custom header.
+
+**A note on system**  
+
+If you run Apache2 from systemd the log file might not be written because systemd prevents it.
+Run Apache in foreground to activate the debug log.
+
+    apachectl -D FOREGROUND
 
 ## TWEAKING APACHE
 

@@ -32,6 +32,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <syslog.h>
 #include <errno.h>
 #include <apr_file_io.h>
+#include <apr_time.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <apr_strings.h>
 
 #include "httpd.h"
 #include "http_core.h"
@@ -115,6 +120,12 @@ struct ntt_node *c_ntt_first(struct ntt *ntt, struct ntt_c *c);
 
 struct ntt_node *c_ntt_next(struct ntt *ntt, struct ntt_c *c);
 
+typedef struct {
+    char *ip; // Client IP retrieved from the connection
+    char *real_ip; // Client IP extracted from custom header
+    char *source; // Information from where the Client IP was retrieved
+} Client_IP;
+
 /* END NTT (Named Timestamp Tree) Headers */
 
 
@@ -133,6 +144,8 @@ static char *log_dir = NULL;
 static char *system_command = NULL;
 static char *response_document = NULL;
 static char *exclude_uri_re = NULL;
+static char *debug_log_path = NULL;
+static char *client_ip_header = NULL; // Header from where to extract the Client IP
 
 static const char *whitelist(cmd_parms *cmd, void *dconfig, const char *ip);
 
@@ -140,7 +153,112 @@ static int http_response_code = DEFAULT_HTTP_RESPONSE_CODE;
 
 int is_whitelisted(const char *ip);
 
-/* END DoS Evasive Maneuvers Globals */
+// Function to remove leading and trailing spaces from a string
+void trim_spaces(char *str) {
+    char *start = str;
+    char *end;
+
+    // Trim leading space
+    while (isspace((unsigned char) *start)) start++;
+
+    // Shift the string, so it starts from the first non-space character
+    if (start != str) {
+        memmove(str, start, strlen(start) + 1);
+    }
+
+    if (*str == 0)  // All spaces?
+        return;
+
+    // Trim trailing space
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char) *end)) end--;
+
+    // Write new null terminator character
+    end[1] = '\0';
+}
+
+// Function to get the last element in a comma-separated string
+void get_last_element(const char *input, char *output) {
+    // Make a copy of the input string because strtok modifies the string it processes
+    char temp[256];
+    strncpy(temp, input, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0'; // Ensure null termination
+
+    char *token;
+    char *last_token = NULL;
+
+    // Use strtok to split the string by commas
+    token = strtok(temp, ",");
+    while (token != NULL) {
+        trim_spaces(token);  // Trim spaces around the token
+        last_token = token;
+        token = strtok(NULL, ",");
+    }
+
+    if (last_token != NULL) {
+        // Copy the last token to output
+        strncpy(output, last_token, 256);
+        output[255] = '\0'; // Ensure null termination
+    } else {
+        output[0] = '\0'; // If no tokens were found, return an empty string
+    }
+}
+
+// Function to get the client's IP address from different sources
+Client_IP get_client_ip(request_rec *r) {
+    Client_IP c = {0};
+    c.ip = apr_pstrdup(r->pool, r->connection->client_ip);
+    c.real_ip = apr_pstrdup(r->pool, c.ip);
+    c.source = "connection"; // Default source
+    if (!client_ip_header) {
+        // End here because no custom header specified to retrieve the client ip from.
+        return c;
+    }
+    // Try to get the client ip from a custom header
+    const char *custom_client_ip = apr_table_get(r->headers_in, client_ip_header);
+    if (!custom_client_ip) {
+        return c;
+    }
+    char last_ip[256];  // Buffer to hold the last IP
+    get_last_element(custom_client_ip, last_ip);
+    if (strlen(last_ip) > 0) {
+        c.real_ip = apr_pstrdup(r->pool, last_ip);
+        c.source = apr_pstrcat(r->pool, "Header ", client_ip_header, NULL);
+    }
+    return c;
+}
+
+static void log_debug(request_rec *r, Client_IP *c) {
+    if (debug_log_path == NULL) {
+        return;
+    }
+
+    apr_file_t *file = NULL;
+    apr_status_t rv = apr_file_open(&file, debug_log_path, APR_WRITE | APR_APPEND | APR_CREATE, APR_OS_DEFAULT,
+                                    r->pool);
+    if (rv != APR_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "Failed to open debug log file: %s", debug_log_path);
+        return;
+    }
+
+    apr_time_exp_t tm;
+    apr_time_exp_gmt(&tm, apr_time_now());
+
+    char time_str[40];
+    apr_snprintf(time_str, sizeof(time_str), "%04d-%02d-%02d %02d:%02d:%02d",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+    const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
+    if (!user_agent) {
+        user_agent = "-";
+    }
+
+    apr_file_printf(file, "[%s] \"%s %s\" %d \"%s\" \"Remote-IP: %s\", \"Real-Client-IP (From %s): %s\"\n",
+                    time_str, r->method, r->uri, DEFAULT_HTTP_RESPONSE_CODE, user_agent, c->ip, c->source,
+                    c->real_ip);
+
+    apr_file_close(file);
+}
 
 static void *create_hit_list(apr_pool_t *p, server_rec *s) {
     /* Create a new hit list for this listener */
@@ -159,16 +277,16 @@ static const char *whitelist(cmd_parms *cmd, void *dconfig, const char *ip) {
 
 static int access_checker(request_rec *r) {
     int ret = OK;
+    Client_IP client_ip = get_client_ip(r);
 
     /* BEGIN DoS Evasive Maneuvers Code */
-
     if (r->prev == NULL && r->main == NULL && hit_list != NULL) {
         char hash_key[2048];
         struct ntt_node *n;
         time_t t = time(NULL);
 
         /* Check whitelist */
-        if (is_whitelisted(CLIENT_IP(r->connection)))
+        if (is_whitelisted(client_ip.real_ip))
             return OK;
 
         /* Check if URI shall be ignored */
@@ -182,7 +300,7 @@ static int access_checker(request_rec *r) {
         }
 
         /* First see if the IP itself is on "hold" */
-        n = ntt_find(hit_list, CLIENT_IP(r->connection));
+        n = ntt_find(hit_list, client_ip.real_ip);
 
         if (n != NULL && t - n->timestamp < blocking_period) {
 
@@ -194,14 +312,14 @@ static int access_checker(request_rec *r) {
         } else {
 
             /* Has URI been hit too much? */
-            snprintf(hash_key, 2048, "%s_%s", CLIENT_IP(r->connection), r->uri);
+            snprintf(hash_key, 2048, "%s_%s", client_ip.real_ip, r->uri);
             n = ntt_find(hit_list, hash_key);
             if (n != NULL) {
 
                 /* If URI is being hit too much, add to "hold" list */
                 if (t - n->timestamp < page_interval && n->count >= page_count) {
                     ret = http_response_code;
-                    ntt_insert(hit_list, CLIENT_IP(r->connection), time(NULL));
+                    ntt_insert(hit_list, client_ip.real_ip, time(NULL));
                 } else {
 
                     /* Reset our hit count list as necessary */
@@ -216,14 +334,14 @@ static int access_checker(request_rec *r) {
             }
 
             /* Has site been hit too much? */
-            snprintf(hash_key, 2048, "%s_SITE", CLIENT_IP(r->connection));
+            snprintf(hash_key, 2048, "%s_SITE", client_ip.real_ip);
             n = ntt_find(hit_list, hash_key);
             if (n != NULL) {
 
                 /* If site is being hit too much, add to "hold" list */
                 if (t - n->timestamp < site_interval && n->count >= site_count) {
                     ret = http_response_code;
-                    ntt_insert(hit_list, CLIENT_IP(r->connection), time(NULL));
+                    ntt_insert(hit_list, client_ip.real_ip, time(NULL));
                 } else {
 
                     /* Reset our hit count list as necessary */
@@ -240,32 +358,33 @@ static int access_checker(request_rec *r) {
 
         /* Perform email notification, system functions, and response */
         if (ret == http_response_code) {
+            log_debug(r, &client_ip);
             char filename[1024];
             struct stat s;
             FILE *file;
 
             snprintf(filename, sizeof(filename), "%s/dos-%s", log_dir != NULL ? log_dir : DEFAULT_LOG_DIR,
-                     CLIENT_IP(r->connection));
+                     client_ip.real_ip);
             if (stat(filename, &s)) {
                 file = fopen(filename, "w");
                 if (file != NULL) {
                     fprintf(file, "%d\n", getpid());
                     fclose(file);
 
-                    LOG(LOG_ALERT, "Blacklisting address %s: possible DoS attack.", CLIENT_IP(r->connection));
+                    LOG(LOG_ALERT, "Blacklisting address %s: possible DoS attack.", client_ip.real_ip);
                     if (email_notify != NULL) {
                         snprintf(filename, sizeof(filename), MAILER, email_notify);
                         file = popen(filename, "w");
                         if (file != NULL) {
                             fprintf(file, "To: %s\n", email_notify);
-                            fprintf(file, "Subject: HTTP BLACKLIST %s\n\n", CLIENT_IP(r->connection));
-                            fprintf(file, "mod_retry_later HTTP Blacklisted %s\n", CLIENT_IP(r->connection));
+                            fprintf(file, "Subject: HTTP BLACKLIST %s\n\n", client_ip.real_ip);
+                            fprintf(file, "mod_retry_later HTTP Blacklisted %s\n", client_ip.real_ip);
                             pclose(file);
                         }
                     }
 
                     if (system_command != NULL) {
-                        snprintf(filename, sizeof(filename), system_command, CLIENT_IP(r->connection));
+                        snprintf(filename, sizeof(filename), system_command, client_ip.real_ip);
                         int ret = system(filename);
                         if (ret == -1) {
                             // Handle error when the system command cannot be executed
@@ -294,13 +413,14 @@ static int access_checker(request_rec *r) {
 
                 // Get or generate the custom response message
                 if (response_document) {
-                    /* We have custom response document from a file */
+                    /* We have a custom response document from a file */
                     // Open the file
                     apr_file_t *file = NULL;
                     apr_finfo_t finfo;
                     apr_status_t rv = apr_file_open(&file, response_document, APR_READ, APR_OS_DEFAULT, r->pool);
                     if (rv != APR_SUCCESS) {
-                        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "Failed to open response document: %s", response_document);
+                        ap_log_rerror(APLOG_MARK, APLOG_ERR, rv, r, "Failed to open response document: %s",
+                                      response_document);
                         return HTTP_INTERNAL_SERVER_ERROR; // Or some other appropriate error response
                     }
 
@@ -329,7 +449,7 @@ static int access_checker(request_rec *r) {
                         return HTTP_INTERNAL_SERVER_ERROR;
                     }
                     snprintf(response_body, 1024, "Too many requests. Try again after %s seconds.\n",
-                            blocking_period_str);
+                             blocking_period_str);
                 }
 
                 // Return HTTP status code
@@ -786,6 +906,26 @@ get_exclude_re(cmd_parms *cmd, void *dummy, const char *arg) {
     return NULL;
 }
 
+static const char *
+get_debug_log(cmd_parms *cmd, void *dummy, const char *arg) {
+    if (arg != NULL && arg[0] != '\0') {
+        if (debug_log_path != NULL)
+            free(debug_log_path);
+        debug_log_path = strdup(arg);
+    }
+    return NULL;
+}
+
+static const char *
+get_client_ip_header(cmd_parms *cmd, void *dummy, const char *arg) {
+    if (arg != NULL && arg[0] != '\0') {
+        if (client_ip_header != NULL)
+            free(client_ip_header);
+        client_ip_header = strdup(arg);
+    }
+    return NULL;
+}
+
 
 /* END Configuration Functions */
 
@@ -828,7 +968,13 @@ static const command_rec access_cmds[] =
                               "Set document to be returned on limit hit"),
 
                 AP_INIT_TAKE1("DOSExcludeURIRe", get_exclude_re, NULL, RSRC_CONF,
-                              "Rehular expression to exclude requests from rate limiting if URI macthes regex"),
+                              "Regular expression to exclude requests from rate limiting if URI macthes regex"),
+
+                AP_INIT_TAKE1("DOSDebugLog", get_debug_log, NULL, RSRC_CONF,
+                              "File path for debug logs. If not set, debug logging switched of"),
+
+                AP_INIT_TAKE1("DOSClientIPHeader", get_client_ip_header, NULL, RSRC_CONF,
+                              "Use custom header to determine the client ip address"),
 
                 {NULL}
         };
