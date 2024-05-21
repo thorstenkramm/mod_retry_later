@@ -41,8 +41,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ls /pkg
           RELEASE_ID=$(jq -r .id < release.json)
-          FILES="foo"
+          FILES=$(find /pkg -type f -name "*.deb")
           for FILE in $FILES;do
             curl -s --fail -H "Authorization: token $GITHUB_TOKEN" \
             -H "Content-Type: $(file -b --mime-type $FILE)" \

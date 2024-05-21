@@ -18,9 +18,13 @@ trap 'on_fail ${LINENO}' ERR
 set -e
 set -o pipefail
 
+env
+
 VERSION=${GITHUB_REF_NAME}
 PKG_NAME=libapache2-mod-retry-later
 PKG_ROOT=/pkg
+
+echo "Building DEB for $PKG_NAME version $VERSION ..."
 
 if [ "$(id -u)" -ne 0 ];then
   echo "Script requires root rights. Execute with sudo"
