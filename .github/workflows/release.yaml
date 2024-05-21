@@ -14,39 +14,8 @@ jobs:
       - name: Build and package
         run: sudo -E bash .github/scripts/build-and-package.sh
 
-      - name: Create release
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=${GITHUB_REF_NAME}
-          PAYLOAD=$(jq -n \
-          --arg tag_name "$VERSION" \
-          --arg target_commitish "main" \
-          --arg name "$VERSION" \
-          --arg body "Release $VERSION" \
-          --argjson draft true \
-          --argjson prerelease true \
-          --argjson generate_release_notes false \
-          '$ARGS.named')
-          echo "${PAYLOAD}"
-          
-          curl --fail https://api.github.com/repos/${GITHUB_REPOSITORY}/releases -v -s -X POST \
-          -H "Accept: application/vnd.github.v3+json" \
-          -H "Authorization: token $GITHUB_TOKEN" -d "$PAYLOAD" -o release.json
-          jq < release.json
-
-      - name: Upload files to release
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ls /pkg
-          RELEASE_ID=$(jq -r .id < release.json)
-          FILES=$(find /pkg -type f -name "*.deb")
-          for FILE in $FILES;do
-            curl -s --fail -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Content-Type: $(file -b --mime-type $FILE)" \
-            --data-binary @$FILE \
-            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename $FILE)"
-          done
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: /pkg/*.deb
